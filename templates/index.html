@@ -8,6 +8,7 @@
     <title>SmartGallery: {{ current_folder_info.display_name }}</title>
     <link rel="icon" type="image/png" href="{{ app_logo_b64 }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/index.css', v='2.24.3') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/virtual_gallery.css', v='1') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/collections.css', v='2.24.3') }}">
 
 <script>
@@ -2562,6 +2563,7 @@ document.addEventListener('focusout', function(e) {
         const streamThresholdBytes = {{ stream_threshold }}; 
         const currentFolderInfo = {{ current_folder_info | tojson }};
         const protectedFolderKeys = {{ protected_folder_keys | tojson }};
+        {% include 'js/virtual_gallery.js' %}
         const initialFiles = {{ files | tojson }};
         let totalFiles = {{ total_files }};
         let totalFolderFiles = {{ total_folder_files }};
@@ -2621,8 +2623,37 @@ document.addEventListener('focusout', function(e) {
         let currentItemCount = 0;
         let galleryItems = [];
         let allFilesData = [];
+        const inspectorOnlyFiles = new Map();
+        let virtualGallery = null;
+        let galleryLazyObserver = null;
+
+        function releaseGalleryItem(element, index) {
+            element.querySelectorAll('img, video').forEach(media => {
+                if (galleryLazyObserver) galleryLazyObserver.unobserve(media);
+                if (media.tagName === 'VIDEO') {
+                    media.pause();
+                    media.removeAttribute('src');
+                    media.load();
+                } else media.removeAttribute('src');
+            });
+            element.querySelector('.ia-close-btn')?.click();
+            if (galleryItems[index] === element) delete galleryItems[index];
+        }
+
+        function refreshVirtualGallery() {
+            focusedItemIndex = Math.min(focusedItemIndex, allFilesData.length - 1);
+            virtualGallery?.setItems(allFilesData);
+            galleryItems = new Array(allFilesData.length);
+            if (virtualGallery) for (const row of virtualGallery.rows.values()) {
+                for (const [index, element] of row.cards) galleryItems[index] = element;
+            }
+        }
+
+        function ensureGalleryItem(index) {
+            return galleryItems[index] || virtualGallery?.ensureIndex(index);
+        }
         const selectedFiles = new Set();
-        let lastSelectedItem = null;
+        let lastSelectedFileId = null;
         let currentSearch = { nav: '', move: '' };
         let focusedItemIndex = -1;
         let hoveredItemIndex = -1;
@@ -3611,7 +3642,28 @@ document.addEventListener('focusout', function(e) {
         }
         
         function formatBytes(bytes, decimals = 1) { if (!bytes) return '0 B'; const k = 1024; const dm = decimals < 0 ? 0 : decimals; const sizes = ['B', 'KB', 'MB', 'GB', 'TB']; const i = Math.floor(Math.log(bytes) / Math.log(k)); return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i]; }
-        function appendFiles(files) { if (typeof resetClusterColorMap === 'function' && currentItemCount === 0) resetClusterColorMap(); if (!files || files.length === 0) { if (currentItemCount === 0) showEmptyState(); updateLoadMoreVisibility(); return; } const fragment = document.createDocumentFragment(); const newLazyElements = []; files.forEach(file => { allFilesData.push(file); const item = createGalleryItem(file); fragment.appendChild(item); galleryItems.push(item); const lazyEl = item.querySelector('.lazy'); if (lazyEl) newLazyElements.push(lazyEl); }); galleryContainer.appendChild(fragment); initializeLazyLoading(newLazyElements); currentItemCount += files.length; updateLoadMoreVisibility(); }
+        function appendFiles(files) {
+            if (typeof resetClusterColorMap === 'function' && currentItemCount === 0) resetClusterColorMap();
+            if (!files || !files.length) {
+                if (!currentItemCount) showEmptyState();
+                updateLoadMoreVisibility();
+                return;
+            }
+            allFilesData.push(...files);
+            currentItemCount += files.length;
+            if (!virtualGallery) virtualGallery = new WindowedGallery(galleryContainer, {
+                mount(file, index) {
+                    const item = createGalleryItem(file);
+                    if (index === focusedItemIndex) item.classList.add('focused');
+                    galleryItems[index] = item;
+                    return item;
+                },
+                unmount: releaseGalleryItem,
+                observe: initializeLazyLoading,
+            });
+            refreshVirtualGallery();
+            updateLoadMoreVisibility();
+        }
         function createGalleryItem(file) {
             const item = document.createElement('div');
             item.className = `gallery-item ${selectedFiles.has(file.id) ? 'selected' : ''}`;
@@ -3624,6 +3676,10 @@ document.addEventListener('focusout', function(e) {
             item.dataset.fileType = file.type;
             item.dataset.aiCaption = file.ai_caption || '';
             item.dataset.aiDate = file.ai_last_scanned || 0;
+            const mediaDimensions = String(file.dimensions || '').split('x').map(Number);
+            if (mediaDimensions.length === 2 && mediaDimensions.every(value => value > 0)) {
+                item.style.setProperty('--sg-media-ratio', `${mediaDimensions[0]} / ${mediaDimensions[1]}`);
+            }
             
             // Drag and Drop setup
             item.setAttribute('draggable', 'true');
@@ -3679,12 +3735,9 @@ document.addEventListener('focusout', function(e) {
                     overlayHTML = `<div class="video-play-overlay" title="Play Preview" onclick="playVideoInGrid(event, this)">▶</div>`;
                 }
 
-                mediaHTML = `
-                    <video ${vidAttrs} loop playsinline class="lazy" 
-                        data-src="${videoSource}" 
-                        poster="/galleryout/thumbnail/${file.id}"></video>
-                    ${overlayHTML}
-                `;
+                mediaHTML = `<img class="lazy sg-video-poster" loading="lazy" alt="${file.name}"
+                    data-src="/galleryout/thumbnail/${file.id}" data-video-src="${videoSource}">
+                    ${overlayHTML}`;
             } else if (file.type === 'document') {
                 const ext = file.name.split('.').pop().toUpperCase();
                 mediaHTML = `<div class="doc-thumb-preview"><span class="doc-icon">📄</span><span class="doc-ext">${ext}</span></div>`;
@@ -3883,13 +3936,13 @@ document.addEventListener('focusout', function(e) {
                 window.lastActiveY = e.clientY;
 
                 // Sync focus
-                if (focusedItemIndex !== galleryItems.indexOf(item)) {
+                if (focusedItemIndex !== Number(item.dataset.galleryIndex)) {
                     if (focusedItemIndex !== -1 && galleryItems[focusedItemIndex]) {
                         let oldFocItem = galleryItems[focusedItemIndex];
                     oldFocItem.classList.remove('focused');
                     oldFocItem.classList.remove('return-focus');
                     }
-                    focusedItemIndex = galleryItems.indexOf(item);
+                    focusedItemIndex = Number(item.dataset.galleryIndex);
                     item.classList.add('focused');
                     if(typeof updateFocusStatusBar === 'function') updateFocusStatusBar();
                 }
@@ -3972,61 +4025,42 @@ document.addEventListener('focusout', function(e) {
             
             galleryContainer.innerHTML = htmlContent; 
         }
-        function initializeLazyLoading(elements) {
-            const observer = new IntersectionObserver((entries) => {
-                entries.forEach(entry => {
-                    const el = entry.target;
-                    
-                    // Handle Images (Keep original simple logic: load once)
-                    if (el.tagName === 'IMG') {
-                        if (entry.isIntersecting) {
-                            if (el.dataset.src) {
-                                el.src = el.dataset.src;
-                                el.removeAttribute('data-src');
-                            }
-                            el.classList.remove("lazy");
-                            observer.unobserve(el); // Images are done once loaded
-                        }
-                        return;
-                    }
+        function mountGridVideo(poster) {
+            const video = document.createElement('video');
+            video.src = poster.dataset.videoSrc;
+            video.poster = poster.currentSrc || poster.src || poster.dataset.src;
+            video.loop = true;
+            video.muted = true;
+            video.playsInline = true;
+            video.preload = 'none';
+            video.style.pointerEvents = 'none';
+            galleryLazyObserver?.unobserve(poster);
+            poster.replaceWith(video);
+            galleryLazyObserver?.observe(video);
+            return video;
+        }
 
-                    // Handle Videos (Smart Play/Pause logic)
-                    if (el.tagName === 'VIDEO') {
-                        if (entry.isIntersecting) {
-                            // 1. Load source if not loaded yet
-                            if (el.dataset.src) {
-                                el.src = el.dataset.src;
-                                // If Autoplay is OFF (Click-to-play), we DON'T call load() aggressively 
-                                // unless user interacts, but setting src usually triggers loading metadata.
-                                // With preload="none", it should be fine.
-                                if (videoAutoplay) el.load(); 
-                                el.removeAttribute('data-src');
-                                el.classList.remove("lazy");
-                            }
-                            
-                            // 2. Play when visible ONLY if preference is ON
-                            if (videoAutoplay) {
-                                const playPromise = el.play();
-                                if (playPromise !== undefined) {
-                                    playPromise.catch(error => { console.log("Autoplay prevented:", error); });
-                                }
-                            }
-                        } else {
-                            // 3. Pause when out of viewport to save resources
-                            if (!el.paused && !el.dataset.src) {
-                                el.pause();
-                            }
+        function initializeLazyLoading(elements) {
+            if (!galleryLazyObserver) galleryLazyObserver = new IntersectionObserver(entries => {
+                entries.forEach(entry => {
+                    const element = entry.target;
+                    if (element.tagName === 'IMG' && entry.isIntersecting) {
+                        if (element.dataset.src) {
+                            element.src = element.dataset.src;
+                            delete element.dataset.src;
                         }
-                        // Do NOT unobserve video! We need to check it continuously.
+                        element.classList.remove('lazy');
+                        if (videoAutoplay && element.classList.contains('sg-video-poster')) {
+                            const video = mountGridVideo(element);
+                            video.play().catch(() => {});
+                        } else galleryLazyObserver.unobserve(element);
+                    } else if (element.tagName === 'VIDEO') {
+                        if (entry.isIntersecting && videoAutoplay) element.play().catch(() => {});
+                        else if (!entry.isIntersecting) element.pause();
                     }
                 });
-            }, {
-                root: null,
-                rootMargin: '50px', // Preload slightly before appearing
-                threshold: 0.2      // Trigger when 20% visible
-            });
-
-            elements.forEach(el => observer.observe(el));
+            }, {root: null, rootMargin: '100px', threshold: .01});
+            elements.forEach(element => galleryLazyObserver.observe(element));
         }
         async function createFolder() {
             const folderName = await smartPrompt("📁 New Folder", "Enter a name for the new folder:", "");
@@ -4132,7 +4166,7 @@ document.addEventListener('focusout', function(e) {
             event.stopPropagation();
                         
             // Sync keyboard focus with mouse selection
-            const newIndex = galleryItems.indexOf(item);
+            const newIndex = Number(item.dataset.galleryIndex);
             if (newIndex !== -1) {
                 if (focusedItemIndex !== -1 && galleryItems[focusedItemIndex]) {
                     let oldFocItem = galleryItems[focusedItemIndex];
@@ -4144,16 +4178,16 @@ document.addEventListener('focusout', function(e) {
             }
 
             const isShift = event.shiftKey;
-            if (isShift && lastSelectedItem) {
-                const lastIndex = galleryItems.findIndex(i => i.dataset.fileId === lastSelectedItem.dataset.fileId);
-                const currentIndex = galleryItems.findIndex(i => i.dataset.fileId === fileId);
+            if (isShift && lastSelectedFileId) {
+                const lastIndex = allFilesData.findIndex(i => i.id === lastSelectedFileId);
+                const currentIndex = allFilesData.findIndex(i => i.id === fileId);
                 const [start, end] = [lastIndex, currentIndex].sort((a, b) => a - b);
                 for (let i = start; i <= end; i++) {
-                    selectedFiles.add(galleryItems[i].dataset.fileId);
+                    selectedFiles.add(allFilesData[i].id);
                 }
             } else {
                 selectedFiles.has(fileId) ? selectedFiles.delete(fileId) : selectedFiles.add(fileId);
-                lastSelectedItem = item;
+                lastSelectedFileId = fileId;
             }
             updateSelectionUI();
         }
@@ -4305,8 +4339,8 @@ document.addEventListener('focusout', function(e) {
             if (rangeBtn) {
                 if (count === 2) {
                     const selectedIds = Array.from(selectedFiles);
-                    const index1 = galleryItems.findIndex(item => item.dataset.fileId === selectedIds[0]);
-                    const index2 = galleryItems.findIndex(item => item.dataset.fileId === selectedIds[1]);
+                    const index1 = allFilesData.findIndex(item => item.id === selectedIds[0]);
+                    const index2 = allFilesData.findIndex(item => item.id === selectedIds[1]);
                     
                     if (index1 !== -1 && index2 !== -1 && Math.abs(index1 - index2) > 1) {
                         rangeBtn.style.display = 'inline-block';
@@ -4376,8 +4410,8 @@ document.addEventListener('focusout', function(e) {
         async function selectAll() { 
             // If all files are already loaded in DOM, do standard fast select
             if (currentItemCount >= totalFiles) {
-                galleryItems.forEach(item => selectedFiles.add(item.dataset.fileId)); 
-                lastSelectedItem = galleryItems.length > 0 ? galleryItems[galleryItems.length - 1] : null; 
+                allFilesData.forEach(file => selectedFiles.add(file.id));
+                lastSelectedFileId = allFilesData.at(-1)?.id || null;
                 updateSelectionUI();
                 return;
             }
@@ -4400,7 +4434,7 @@ document.addEventListener('focusout', function(e) {
                 showNotification("Error selecting all files.", "error");
             }
         }
-        function deselectAll() { selectedFiles.clear(); lastSelectedItem = null; updateSelectionUI(); }
+        function deselectAll() { selectedFiles.clear(); lastSelectedFileId = null; updateSelectionUI(); }
         
         // --- RANGE SELECTION LOGIC ---
         function selectRange(index1, index2) {
@@ -4408,8 +4442,8 @@ document.addEventListener('focusout', function(e) {
             const end = Math.max(index1, index2);
             
             for (let i = start + 1; i < end; i++) {
-                if (galleryItems[i]) {
-                    selectedFiles.add(galleryItems[i].dataset.fileId);
+                if (allFilesData[i]) {
+                    selectedFiles.add(allFilesData[i].id);
                 }
             }
             // Update UI to show newly selected items
@@ -4424,7 +4458,7 @@ document.addEventListener('focusout', function(e) {
             const buttons = document.querySelectorAll('.toggle-select-all-btn');
             
             // Check if all currently visible items in the grid are selected
-            const allSelected = galleryItems.length > 0 && galleryItems.every(item => selectedFiles.has(item.dataset.fileId));
+            const allSelected = allFilesData.length > 0 && allFilesData.every(file => selectedFiles.has(file.id));
 
             buttons.forEach(btn => {
                 // Identify the desktop button by its specific ID
@@ -4443,12 +4477,13 @@ document.addEventListener('focusout', function(e) {
         }
 
         function toggleSelectAll() {
-            const allSelected = galleryItems.length > 0 && galleryItems.every(item => selectedFiles.has(item.dataset.fileId));
+            const allSelected = allFilesData.length > 0 && allFilesData.every(file => selectedFiles.has(file.id));
             if (allSelected) deselectAll();
             else selectAll();
         }
         
         function toggleFavorite(event, fileId, element) { 
+            element = element || document.createElement('button');
             event.stopPropagation(); 
             const originalContent = element.innerHTML; 
             element.innerHTML = '⏳'; 
@@ -4570,8 +4605,9 @@ document.addEventListener('focusout', function(e) {
                         
                         setTimeout(() => {
                             item.remove();
-                            galleryItems = galleryItems.filter(gi => gi !== item);
+                            // Mounted cards are rebuilt from metadata below.
                             allFilesData = allFilesData.filter(f => f.id !== fileId);
+                            refreshVirtualGallery();
                             selectedFiles.delete(fileId);
                             updateSelectionUI();
                             
@@ -4891,7 +4927,7 @@ document.addEventListener('focusout', function(e) {
             // If in Focus Mode AND NOT forcing open (like via 'V' key),
             // simply toggle selection.
             if (!forceOpen && document.body.classList.contains('focus-mode')) {
-                const item = galleryItems.find(i => i.dataset.fileId === fileId);
+                const item = galleryItems.find(i => i?.dataset.fileId === fileId);
                 if (item) {
                     toggleSelection(event, fileId, item);
                 }
@@ -4899,7 +4935,7 @@ document.addEventListener('focusout', function(e) {
             }
             // -------------------------------
 
-            currentLightboxIndex = galleryItems.findIndex(item => item.dataset.fileId === fileId); 
+            currentLightboxIndex = allFilesData.findIndex(item => item.id === fileId);
             if (currentLightboxIndex === -1) return; 
             currentZoom = 1; currentTranslateX = 0; currentTranslateY = 0; panStep = 50; 
             document.body.classList.add('lightbox-open'); 
@@ -4940,7 +4976,8 @@ document.addEventListener('focusout', function(e) {
                     oldFocItem.classList.remove('return-focus');
                     }
                 focusedItemIndex = currentLightboxIndex;
-                const newItem = galleryItems[focusedItemIndex];
+                document.body.classList.remove('lightbox-open');
+                const newItem = ensureGalleryItem(focusedItemIndex);
                 if (newItem) {
                     newItem.classList.add('focused', 'return-focus');
                     if(typeof updateFocusStatusBar === 'function') updateFocusStatusBar();
@@ -5019,10 +5056,7 @@ document.addEventListener('focusout', function(e) {
         }
         
         function showItemAtIndex(index) {
-            const item = galleryItems[index];
-            if (!item) return;
-            
-            const file = allFilesData.find(f => f.id === item.dataset.fileId);
+            const file = allFilesData[index];
             if (!file) return;
             
             currentLightboxFile = file;
@@ -5412,7 +5446,7 @@ document.addEventListener('focusout', function(e) {
             }
 
             const itemToDelete = galleryItems[currentLightboxIndex];
-            const fileId = itemToDelete.dataset.fileId;
+            const fileId = allFilesData[currentLightboxIndex].id;
 
             if (!noConfirm) {
                 if (inCollection) {
@@ -5449,9 +5483,10 @@ document.addEventListener('focusout', function(e) {
                 .then(({ ok, data }) => {
                     if (ok && data.status === 'success') {
                         showNotification(data.message || 'File deleted!', 'success');
-                        itemToDelete.remove();
-                        galleryItems.splice(currentLightboxIndex, 1);
+                        itemToDelete?.remove();
+                        // Sparse DOM slots follow metadata, never determine file order.
                         allFilesData = allFilesData.filter(f => f.id !== fileId);
+                            refreshVirtualGallery();
                         
                         // UPDATE GLOBAL COUNTERS PROPERLY
                         currentItemCount--;
@@ -5514,6 +5549,7 @@ document.addEventListener('focusout', function(e) {
                     if (fileIndexInData !== -1) {
                         allFilesData[fileIndexInData].name = data.new_name;
                         allFilesData[fileIndexInData].id = newId;
+                        refreshVirtualGallery();
                         if (currentLightboxFile && currentLightboxFile.id === fileId) {
                             currentLightboxFile.name = data.new_name;
                             currentLightboxFile.id = newId;
@@ -7869,7 +7905,7 @@ document.addEventListener('focusout', function(e) {
                             }
                             break;
                             
-                        case 'f': case 'F': if(currentLightboxFile) { const item = galleryItems[currentLightboxIndex]; if(item) toggleFavorite(e, currentLightboxFile.id, item.querySelector('.favorite-btn')); } break;
+                        case 'f': case 'F': if(currentLightboxFile) { const item = galleryItems[currentLightboxIndex]; toggleFavorite(e, currentLightboxFile.id, item?.querySelector('.favorite-btn')); } break;
                         
                         case 'a': case 'A': 
                             e.preventDefault(); openTaggingModal('collection'); break;
@@ -7946,12 +7982,13 @@ document.addEventListener('focusout', function(e) {
                             return 1;
                         }
                         const style = window.getComputedStyle(galleryContainer);
-                        return style.getPropertyValue('grid-template-columns').split(' ').length;
+                        return virtualGallery?.columns || style.getPropertyValue('grid-template-columns').split(' ').length;
                     };
 
                     // --- ROBUST TARGET LOGIC (V5: Drill-down & State Check) ---
                     const getTargetIndex = () => {
                         // The focused element is now the single source of truth
+                        if (focusedItemIndex !== -1) ensureGalleryItem(focusedItemIndex);
                         return (focusedItemIndex !== -1) ? focusedItemIndex : -1;
                     };
 
@@ -7984,7 +8021,7 @@ document.addEventListener('focusout', function(e) {
                             const elAtMouse = (window.lastMouseX > 0) ? document.elementFromPoint(window.lastMouseX, window.lastMouseY) : null;
                             const itemAtMouse = elAtMouse ? elAtMouse.closest('.gallery-item') : null;
                             
-                            if (itemAtMouse && galleryItems.indexOf(itemAtMouse) === idx) {
+                            if (itemAtMouse && Number(itemAtMouse.dataset.galleryIndex) === idx) {
                                 deleteFile(e, galleryItems[idx].dataset.fileId, galleryItems[idx].querySelector('.delete-btn'), true);
                                 return;
                             }
@@ -8232,14 +8269,14 @@ document.addEventListener('focusout', function(e) {
                     oldFocItem.classList.remove('return-focus');
                     }
                     focusedItemIndex = newIndex;
-                    const newItem = galleryItems[focusedItemIndex];
+                    const newItem = ensureGalleryItem(focusedItemIndex);
                     newItem.classList.add('focused', 'return-focus');
                     if(typeof updateFocusStatusBar === 'function') updateFocusStatusBar();
                     if(typeof scheduleGenerationMetadata === 'function') scheduleGenerationMetadata();
                     newItem.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
                 } else if (focusedItemIndex === -1) {
                     focusedItemIndex = 0;
-                    galleryItems[0].classList.add('focused');
+                    ensureGalleryItem(0)?.classList.add('focused');
                 }
             }
 
@@ -8698,8 +8735,11 @@ document.addEventListener('focusout', function(e) {
             event.preventDefault();
 
             const wrapper = btnElement.closest('.thumbnail-wrapper');
-            const video = wrapper.querySelector('video');
-            
+            let video = wrapper.querySelector('video');
+            if (!video) {
+                const poster = wrapper.querySelector('.sg-video-poster');
+                if (poster) video = mountGridVideo(poster);
+            }
             if (!video) return;
 
             // 1. Hide the overlay button
@@ -10527,7 +10567,7 @@ document.addEventListener('focusout', function(e) {
         }
 
         async function openFileInfoPanel(fileId) {
-            const file = allFilesData.find(f => f.id === fileId);
+            const file = allFilesData.find(f => f.id === fileId) || inspectorOnlyFiles.get(fileId);
             if (!file) return;
             currentFiFileId = fileId;
 
@@ -12750,7 +12790,7 @@ function openNotesInfoPanel() {
     if (!fileObj) {
         currentNote.has_workflow = 0;
         currentNote.is_favorite = 0;
-        allFilesData.push(currentNote);
+        inspectorOnlyFiles.set(currentNote.id, currentNote);
     }
     
     // 3. Open the rating panel

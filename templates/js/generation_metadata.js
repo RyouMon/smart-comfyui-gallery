@@ -349,11 +349,11 @@
         }
 
         let item = pinnedId
-            ? (galleryItems?.find(i => i.dataset.fileId === pinnedId))
+            ? (galleryItems?.find(i => i?.dataset.fileId === pinnedId))
             : (galleryItems ? galleryItems[focusedItemIndex] : null);
 
         if (!item && (panel.matches(':hover') || panel.contains(document.activeElement))) {
-            item = galleryItems?.find(i => i.dataset.fileId === retainedId);
+            item = galleryItems?.find(i => i?.dataset.fileId === retainedId);
         }
 
         const file = isLightbox
@@ -454,7 +454,7 @@
 
         if (enabled && typeof focusedItemIndex !== 'undefined' && focusedItemIndex < 0 && !document.body.classList.contains('lightbox-open') && typeof galleryItems !== 'undefined' && galleryItems && galleryItems.length > 0) {
             focusedItemIndex = 0;
-            galleryItems[0].classList.add('focused');
+            ensureGalleryItem(0)?.classList.add('focused');
             if (typeof updateFocusStatusBar === 'function') updateFocusStatusBar();
         }
         scheduleGenerationMetadata();

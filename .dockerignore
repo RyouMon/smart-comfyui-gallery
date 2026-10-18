@@ -1,0 +1,6 @@
+*
+!smartgallery.py
+!templates/
+!templates/**
+!Dockerfile.fork
+!LICENSE

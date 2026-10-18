@@ -1325,3 +1325,35 @@ Local-first. Privacy-first. Minimal dependencies. Cross-platform. MIT License.
   <br><br>
   <em>Made for the ComfyUI community and every digital creator who takes their work seriously.</em>
 </p>
+
+## RyouMon performance fork
+
+This fork retains upstream 2.24.3 and its MIT license. The management gallery
+uses windowed rows in both grid and list layouts: only visible rows and two
+overscan rows on either side are mounted. File order, range selection, select
+all, and lightbox navigation use metadata rather than retained card elements.
+Video cards use lazy image posters until playback is requested, and release
+their media source when unmounted. Gallery-card blur and bulk transitions are
+removed. Collection notes stay outside the gallery's ordered file list.
+
+Directory discovery uses a short-lived snapshot with one background refresh
+worker. `FOLDER_CACHE_TTL_SECONDS` defaults to `10`; normal navigation reuses the
+snapshot while it refreshes. Explicit Refresh and file-management operations
+invalidate or refresh it immediately. Counts use the indexed sidebar snapshot.
+
+Build the fork with the official, digest-pinned Python/FFmpeg runtime:
+
+```sh
+docker build -f Dockerfile.fork --build-arg REVISION="$(git rev-parse HEAD)" -t local/smartgallery:2.24.3-virtual.1 .
+```
+
+Run `tests/test_folder_cache.py` with the application's Python environment.
+`tests/browser_virtual_gallery.js` runs in a dedicated candidate browser tab
+after all metadata is loaded. It checks selection across unmounted rows,
+lightbox and keyboard navigation, layout switching, video release, collection
+removal and a 10,000-item synthetic DOM-scaling fixture. That fixture does not
+claim to measure 10,000 real media files or backend indexing.
+
+The unchanged before/after browser workload and separate backend profiler are
+under `tests/performance/`. Keep real library records, credentials, media,
+screenshots and raw profiling results outside this public repository.

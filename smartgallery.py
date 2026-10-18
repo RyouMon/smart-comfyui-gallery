@@ -711,6 +711,12 @@ app = Flask(__name__, static_folder='templates', static_url_path='/static')
 app.secret_key = SECRET_KEY
 gallery_view_cache = []
 folder_config_cache = None
+folder_config_cached_at = 0.0
+folder_config_lock = threading.RLock()
+folder_config_build_lock = threading.RLock()
+folder_config_refreshing = False
+folder_config_generation = 0
+FOLDER_CACHE_TTL_SECONDS = max(0.0, float(os.environ.get('FOLDER_CACHE_TTL_SECONDS', '10')))
 FFPROBE_EXECUTABLE_PATH = None
 
 
@@ -2518,9 +2524,43 @@ def init_db(conn=None):
         if close_conn: conn.close()
         
 def get_dynamic_folder_config(force_refresh=False):
-    global folder_config_cache
-    if folder_config_cache is not None and not force_refresh:
-        return folder_config_cache
+    global folder_config_refreshing
+    # Do not make navigation wait for filesystem discovery. A stale snapshot
+    # is refreshed by one background worker; explicit sync still waits for a
+    # current snapshot. The build lock must never guard cached reads.
+    cached = folder_config_cache
+    if cached is not None and not force_refresh:
+        if time.monotonic() - folder_config_cached_at >= FOLDER_CACHE_TTL_SECONDS:
+            with folder_config_lock:
+                if not folder_config_refreshing:
+                    folder_config_refreshing = True
+                    threading.Thread(target=refresh_folder_config_background, daemon=True).start()
+        return cached
+    with folder_config_build_lock:
+        return build_dynamic_folder_config()
+
+
+def refresh_folder_config_background():
+    global folder_config_refreshing
+    try:
+        with folder_config_build_lock:
+            build_dynamic_folder_config()
+    finally:
+        with folder_config_lock:
+            folder_config_refreshing = False
+
+
+def invalidate_folder_config():
+    global folder_config_cache, folder_config_cached_at, folder_config_generation
+    with folder_config_lock:
+        folder_config_cache = None
+        folder_config_cached_at = 0.0
+        folder_config_generation += 1
+
+
+def build_dynamic_folder_config():
+    global folder_config_cache, folder_config_cached_at
+    generation = folder_config_generation
 
     #print("INFO: Refreshing folder configuration by scanning directory tree...")
 
@@ -2662,7 +2702,12 @@ def get_dynamic_folder_config(force_refresh=False):
     except Exception as e:
         print(f"Error calculating folder file counts: {e}")
 
-    folder_config_cache = dynamic_config
+    # A mutation may have invalidated discovery while this scan was running.
+    # Return this request's result, but never republish it as the current cache.
+    with folder_config_lock:
+        if generation == folder_config_generation:
+            folder_config_cache = dynamic_config
+            folder_config_cached_at = time.monotonic()
     return dynamic_config
     
 # --- BACKGROUND WATCHER THREAD ---
@@ -3062,6 +3107,7 @@ def sync_folder_on_demand(folder_path):
             conn.commit()
 
         if data_to_upsert or files_to_delete:
+            invalidate_folder_config()
             yield f"data: {json.dumps({'message': 'Sync complete. Reloading...', 'status': 'reloading', 'current': total_files, 'total': total_files})}\n\n"
         else:
             yield f"data: {json.dumps({'message': 'Folder is up-to-date.', 'status': 'no_changes', 'current': total_files, 'total': total_files})}\n\n"
@@ -3591,6 +3637,18 @@ def strip_media_metadata(input_path, output_path, file_type):
     return False    
     
 # --- FLASK ROUTES ---
+@app.after_request
+def invalidate_folder_config_after_mutation(response):
+    paths = ('/galleryout/create_folder', '/galleryout/mount_folder',
+             '/galleryout/unmount_folder', '/galleryout/rename_folder/',
+             '/galleryout/delete_folder/', '/galleryout/rename_file/',
+             '/galleryout/delete/', '/galleryout/delete_batch', '/galleryout/move_batch',
+             '/galleryout/copy_batch', '/galleryout/upload', '/galleryout/rescan_folder')
+    if request.method in ('POST', 'PUT', 'DELETE') and response.status_code < 400 and request.path.startswith(paths):
+        invalidate_folder_config()
+    return response
+
+
 @app.route('/galleryout/')
 @app.route('/')
 def gallery_redirect_base():
@@ -3783,7 +3841,7 @@ def sync_status(folder_key):
             yield f"data: {json.dumps({'status': 'no_changes', 'message': 'Virtual collection'})}\n\n"
         return Response(dummy_stream(), mimetype='text/event-stream')
 
-    folders = get_dynamic_folder_config()
+    folders = get_dynamic_folder_config(force_refresh=True)
     if folder_key not in folders:
         abort(404)
     folder_path = folders[folder_key]['path']
@@ -4500,7 +4558,7 @@ def gallery_view(folder_key):
         return redirect(url_for('gallery_view', folder_key='_root_'))
 
     # 5. FOLDER CONFIGURATION
-    folders = get_dynamic_folder_config(force_refresh=True)
+    folders = get_dynamic_folder_config()
     
     # If root not found or invalid key
     if folder_key not in folders:
@@ -4963,7 +5021,11 @@ def gallery_view(folder_key):
     
     gallery_view_cache = process_clustering(gallery_view_cache, cluster_mode, cluster_sort, cluster_target_id, cluster_scope, active_filters_count)
 
-    total_folder_files, _, _ = scan_folder_and_extract_options(folder_path, recursive=is_recursive)
+    # Use the same indexed counts as the sidebar. Discovery belongs to sync,
+    # rather than every sort/filter/navigation request.
+    total_folder_files = current_folder_info.get('file_count', 0)
+    if is_recursive:
+        total_folder_files += current_folder_info.get('descendant_file_count', 0)
     total_db_files = 0 
     with get_db_connection() as conn_opts:
         try:
@@ -7779,7 +7841,7 @@ def get_sidebar_state():
     """Returns the current state of folders and collections for real-time sync."""
     if (IS_EXHIBITION_MODE or FORCE_LOGIN) and not session.get('user_id'):
         return jsonify({'status': 'error', 'message': 'Authentication required'}), 401
-    folders = get_dynamic_folder_config(force_refresh=True)
+    folders = get_dynamic_folder_config()
     with get_db_connection() as conn:
         flags = conn.execute("SELECT * FROM collections WHERE type='system_flag' ORDER BY id").fetchall()
         if IS_EXHIBITION_MODE:

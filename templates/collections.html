@@ -854,7 +854,7 @@ async function untagCurrentCollection() {
     if (!currentFolderInfo.is_collection) { showNotification("Untag is only for Collections.", "info"); return; }
     if (currentFolderInfo.collection_id === 'all') { showNotification("Cannot untag from 'All Collections'.", "info"); return; }
 
-    const targets = selectedFiles.size > 0 ? [...selectedFiles] : (focusedItemIndex !== -1 ? [galleryItems[focusedItemIndex].dataset.fileId] : []);
+    const targets = selectedFiles.size > 0 ? [...selectedFiles] : (focusedItemIndex !== -1 && allFilesData[focusedItemIndex] ? [allFilesData[focusedItemIndex].id] : []);
     if (targets.length === 0) return;
 
     try {
@@ -866,22 +866,17 @@ async function untagCurrentCollection() {
         if (data.status === 'success') {
             showNotification(`Removed ${targets.length} item(s).`, "success");
             loadCollections();
-            targets.forEach(fid => {
-                const item = document.querySelector(`.gallery-item[data-file-id="${fid}"]`);
-                if (item) {
-                    item.style.transition = 'all 0.3s'; item.style.opacity = '0'; item.style.transform = 'scale(0.8)';
-                    setTimeout(() => {
-                        item.remove();
-                        galleryItems = galleryItems.filter(gi => gi.dataset.fileId !== fid);
-                        allFilesData = allFilesData.filter(f => f.id !== fid);
-                        selectedFiles.delete(fid);
-                        currentItemCount--; totalFiles--; totalFolderFiles--;
-                        if(typeof updateFileCountBadge === 'function') updateFileCountBadge();
-                        if(typeof updateSelectionUI === 'function') updateSelectionUI();
-                        if (galleryItems.length === 0 && typeof showEmptyState === 'function') showEmptyState();
-                    }, 300);
-                }
-            });
+            const removed = new Set(targets);
+            const previousCount = allFilesData.length;
+            allFilesData = allFilesData.filter(file => !removed.has(file.id));
+            currentItemCount -= previousCount - allFilesData.length;
+            totalFiles -= targets.length;
+            totalFolderFiles -= targets.length;
+            targets.forEach(id => selectedFiles.delete(id));
+            if (typeof refreshVirtualGallery === 'function') refreshVirtualGallery();
+            if (typeof updateFileCountBadge === 'function') updateFileCountBadge();
+            if (typeof updateSelectionUI === 'function') updateSelectionUI();
+            if (!allFilesData.length && typeof showEmptyState === 'function') showEmptyState();
         }
     } catch (e) { showNotification("Error removing from collection", "error"); }
 }

@@ -1,0 +1,11 @@
+/* Bounded DOM rows; retain the existing card controls and responsive layouts. */
+#gallery-container.sg-virtual-gallery { display: block !important; overflow-anchor: none; }
+.sg-virtual-spacer { width: 1px; pointer-events: none; }
+.sg-virtual-row { display: grid; align-items: start; }
+.sg-virtual-row .gallery-item { min-width: 0; backdrop-filter: none; transition: none; }
+.sg-virtual-row .gallery-item:hover { transform: none; }
+.sg-virtual-row .selection-checkmark { backdrop-filter: none; transition: none; }
+.sg-virtual-row .thumbnail-wrapper img { aspect-ratio: var(--sg-media-ratio, auto); object-fit: contain; }
+.sg-virtual-row .thumbnail-wrapper video { aspect-ratio: var(--sg-media-ratio, auto); object-fit: contain; }
+body.list-view-active .sg-virtual-row .gallery-item { counter-increment: none; }
+body.list-view-active .sg-virtual-row .list-col-index::before { content: attr(data-row-number); }

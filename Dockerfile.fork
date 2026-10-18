@@ -1,0 +1,10 @@
+FROM mmartial/smart-comfyui-gallery:2.24.3@sha256:de442c048a5a21fcb8148eaff1a005c6d2057f13f61ed504606df4ef8ddae6cb
+
+# Keep the official Python/FFmpeg runtime and launch behavior; replace only the
+# application sources tracked in this fork.
+COPY smartgallery.py /app/smartgallery.py
+COPY templates/ /app/templates/
+ARG REVISION=development
+LABEL org.opencontainers.image.source="https://github.com/RyouMon/smart-comfyui-gallery" \
+      org.opencontainers.image.revision="${REVISION}" \
+      org.opencontainers.image.version="2.24.3-virtual.1"
