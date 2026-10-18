@@ -12054,6 +12054,10 @@ async function openShareModal(e, collId, collName) {
                 deskPanelToggle.parentNode.replaceChild(newDesk, deskPanelToggle);
                 
                 newDesk.addEventListener('click', async (e) => {
+                    // Stop bubbling before await: the outside-click listener
+                    // still holds the replaced button and would close the
+                    // panel before this handler toggles it open again.
+                    e.stopPropagation();
                     if (e.target.classList.contains('filter-reset-icon') || e.target.classList.contains('filter-reset-badge')) {
                         e.stopPropagation();
                         e.preventDefault();
@@ -12074,6 +12078,7 @@ async function openShareModal(e, collId, collName) {
                 mobPanelToggle.parentNode.replaceChild(newMob, mobPanelToggle);
                 
                 newMob.addEventListener('click', async (e) => {
+                    e.stopPropagation();
                     if (e.target.classList.contains('filter-reset-icon') || e.target.classList.contains('filter-reset-badge')) {
                         e.stopPropagation();
                         e.preventDefault();

@@ -7,6 +7,15 @@
     check(currentItemCount === totalFiles, 'Load all metadata before regression tests');
     const count = allFilesData.length;
     check(count > 100, 'Expected a multi-window test library');
+    const filterPanel = document.getElementById('desktop-search-panel');
+    filterPanel.classList.remove('visible');
+    document.getElementById('search-toggle-desktop').click();
+    await frame();
+    check(filterPanel.classList.contains('visible'), 'Filters did not open');
+    document.getElementById('search-toggle-desktop').click();
+    await frame();
+    check(!filterPanel.classList.contains('visible'), 'Filters reopened while closing');
+    results.filter_toggle = true;
     ensureGalleryItem(count-1);
     await frame();
     check(galleryItems[count-1]?.isConnected, 'Last item did not mount');
